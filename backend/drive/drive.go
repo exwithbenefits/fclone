@@ -217,7 +217,7 @@ func init() {
 					m.Set("root_folder_id", "appDataFolder")
 				}
 
-				if opt.ServiceAccountFile == "" && opt.ServiceAccountCredentials == "" {
+				if opt.ServiceAccountFile == "" && opt.ServiceAccountCredentials == "" && !opt.EnvAuth {
 					return oauthutil.ConfigOut("teamdrive", &oauthutil.Options{
 						OAuth2Config: driveConfig,
 					})
@@ -468,7 +468,11 @@ If downloading a file returns the error "This file has been identified
 as malware or spam and cannot be downloaded" with the error code
 "cannotDownloadAbusiveFile" then supply this flag to rclone to
 indicate you acknowledge the risks of downloading the file and rclone
-will download it anyway.`,
+will download it anyway.
+
+Note that if you are using service account it will need Manager
+permission (not Content Manager) to for this flag to work. If the SA
+does not have the right permission, Google will just ignore the flag.`,
 			Advanced: true,
 		}, {
 			Name:     "keep_revision_forever",
@@ -597,7 +601,19 @@ resource key is no needed.
 			// Encode invalid UTF-8 bytes as json doesn't handle them properly.
 			// Don't encode / as it's a valid name character in drive.
 			Default: encoder.EncodeInvalidUtf8,
-		}}...),
+		}, {
+	    Name:     "env_auth",
+	    Help:     "Get IAM credentials from runtime (environment variables or instance meta data if no env vars).\n\nOnly applies if service_account_file and service_account_credentials is blank.",
+	    Default:  false,
+	    Advanced: true,
+	    Examples: []fs.OptionExample{{
+				Value: "false",
+				Help:  "Enter credentials in the next step.",
+	  }, {
+				Value: "true",
+				Help:  "Get GCP IAM credentials from the environment (env vars or IAM).",
+	  }},
+  }}...),
 	})
 
 	// register duplicate MIME types first
@@ -657,6 +673,7 @@ type Options struct {
 	SkipDanglingShortcuts     bool                 `config:"skip_dangling_shortcuts"`
 	ResourceKey               string               `config:"resource_key"`
 	Enc                       encoder.MultiEncoder `config:"encoding"`
+	EnvAuth                   bool                 `config:"env_auth"`
 }
 
 // Fs represents a remote drive server
@@ -689,7 +706,7 @@ type Fs struct {
 	lastChangeSATime    time.Time
 	FileObj             *fs.Object
 	FileName            string
-	dirResourceKeys     *sync.Map // map directory ID to resource key
+	dirResourceKeys     *sync.Map           // map directory ID to resource key
 }
 
 type baseObject struct {
@@ -964,7 +981,7 @@ func (f *Fs) shouldRetry(ctx context.Context, err error) (bool, error) {
 			} else if f.opt.StopOnDownloadLimit && reason == "downloadQuotaExceeded" {
 				fs.Errorf(f, "Received download limit error: %v", err)
 				return false, fserrors.FatalError(err)
-			} else if f.opt.StopOnUploadLimit && reason == "quotaExceeded" {
+			} else if f.opt.StopOnUploadLimit && reason == "quotaExceeded" || reason == "storageQuotaExceeded") {
 				fs.Errorf(f, "Received upload limit error: %v", err)
 				return false, fserrors.FatalError(err)
 			} else if f.opt.StopOnUploadLimit && reason == "teamDriveFileLimitExceeded" {
@@ -1329,6 +1346,12 @@ func createOAuthClient(ctx context.Context, opt *Options, name string, m configm
 		oAuthClient, err = getServiceAccountClient(ctx, opt, []byte(opt.ServiceAccountCredentials))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create oauth client from service account: %w", err)
+		}
+			} else if opt.EnvAuth {
+							scopes := driveScopes(opt.Scope)
+							oAuthClient, err = google.DefaultClient(ctx, scopes...)
+							if err != nil {
+											return nil, fmt.Errorf("failed to create client from environment: %w", err)
 		}
 	} else {
 		oAuthClient, _, err = oauthutil.NewClientWithBaseClient(ctx, name, m, driveConfig, getClient(ctx, opt))
@@ -4007,13 +4030,13 @@ Usage:
 	Name:  "delete-drive",
 	Short: "Delete shared drive",
 	Long: `This command delete shared drive (cannot delete drive with untrashed files).
-	
+
 Usage:
-	
+
 	rclone backend delete-drive drive:
 	rclone backend delete-drive drive:{0123ABCDEF-6Uk9PVA}
 	rclone backend delete-drive drive: -o force
-		
+
 User's confirmation is needed before deleteing.
 	`,
 	Opts: map[string]string{
@@ -4025,7 +4048,7 @@ User's confirmation is needed before deleteing.
 	Long: `This command list all shared drives (teamdrives) available to this
 	account formatted for parsing.
 Usage:
-	rclone backend lsdrives drive: 
+	rclone backend lsdrives drive:
 	rclone backend lsdrives drive: -o separator=;
 `,
 	Opts: map[string]string{
@@ -4081,8 +4104,10 @@ Usage:
 This takes an optional directory to trash which make this easier to
 use via the API.
     rclone backend untrash drive:directory
-    rclone backend -i untrash drive:directory subdir
-Use the -i flag to see what would be restored before restoring it.
+    rclone backend --interactive untrash drive:directory subdir
+
+Use the --interactive/-i or --dry-run flag to see what would be restored before restoring it
+
 Result:
     {
         "Untrashed": 17,
@@ -4104,7 +4129,7 @@ this directory. If it doesn't end with a / then the last path
 component will be used as the file name.
 If the destination is a drive backend then server-side copying will be
 attempted if possible.
-Use the -i flag to see what would be copied before copying.
+Use the --interactive/-i or --dry-run flag to see what would be copied before copying.
 `,
 }, {
 	Name:  "exportformats",
